@@ -1,0 +1,63 @@
+log:
+  level: debug
+  disable_sentry: true
+
+db:
+  url: db_url
+
+attempts:
+  daily: 5
+
+certificates_issuer:
+  list:
+    - address: contract_address
+      name: contract_name
+      from_block: block_to_start_from
+
+certificates_fabric:
+  list:
+    - address: contract_address
+      name: contract_name
+      from_block: block_to_start_from
+
+certificates_integrator:
+  list:
+    - network: ethereum # Sepolia
+      address: contract_address
+    - network: polygon # Mumbai
+      address: contract_address
+    - network: q # Testnet
+      address: contract_address
+
+networks:
+  list:
+    - name: ethereum
+      rpc_url: wss://...
+      https_url: https://...
+      key: api_key
+    - name: polygon
+      rpc_url: wss://
+      https_url: https://...
+      key: api_key
+    - name: q
+      rpc_url: wss://
+      https_url: https://...
+      key: api_key
+    - name: metamask
+      rpc_url: rpc_url
+      https_url: https_url
+      key: private_key
+    - name: infura
+      rpc_url: rpc_url
+      https_url: https_url
+      key: api_key
+
+listener:
+  addr: :8000
+
+cop:
+  disabled: true
+  endpoint: "http://..."
+  upstream: "http://..."
+  service_name: cert-integrator-svc
+  service_port: 80

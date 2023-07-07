@@ -13,10 +13,10 @@ import (
 	"gitlab.com/distributed_lab/logan/v3/errors"
 )
 
-func (i *Indexer) handleFabricDeployLog(eventLog types.Log, client *ethclient.Client) error {
+func (i *indexer) handleFabricDeployLog(eventLog types.Log, client *ethclient.Client) error {
 	i.log.WithField("address", eventLog.Address.Hex()).Debugf("start handling deploy event")
 
-	fabric, err := contracts.NewTokenFactory(eventLog.Address, client)
+	fabric, err := contracts.NewTokenFactoryContract(eventLog.Address, client)
 	if err != nil {
 		return errors.Wrap(err, "failed to create new issuer instance")
 	}
@@ -35,52 +35,67 @@ func (i *Indexer) handleFabricDeployLog(eventLog types.Log, client *ethclient.Cl
 		i.log.WithField("address", contract.Address).Debugf("contract already exists")
 
 		blockNumber := int64(event.Raw.BlockNumber)
-		err = i.ContractsQ.FilterByAddresses(contract.Address).Update(data.ContractToUpdate{
-			Name:  &event.TokenContractParams.TokenName,
+		err = i.ContractsQ.FilterByAddresses(event.Raw.Address.Hex()).Update(data.ContractToUpdate{
 			Block: &blockNumber,
 		})
-		return err
+		if err != nil {
+			return errors.Wrap(err, "failed to update fabric contract")
+		}
+
+		return nil
 	}
 
-	newContract, err := i.ContractsQ.Insert(data.Contract{
-		Name:    event.TokenContractParams.TokenName,
-		Address: event.NewTokenContractAddr.Hex(),
-		Type:    data.ISSUER,
-	})
+	err = i.processNewContract(event)
 	if err != nil {
-		return errors.Wrap(err, "failed to save new contract")
-	}
-
-	treeStorage := postgres.NewPGDBStorage(i.cfg.DB(), newContract.Id)
-
-	_, err = merkletree.NewMerkleTree(i.ctx, treeStorage, 100)
-	if err != nil {
-		return errors.Wrap(err, "failed to create new merkle tree")
-	}
-
-	blockNumber := int64(event.Raw.BlockNumber)
-	err = i.recreateIssuerRunner(blockNumber)
-	if err != nil {
-		return errors.Wrap(err, "failed to recreate issuers runner")
-	}
-
-	err = i.ContractsQ.FilterByAddresses(newContract.Address).Update(data.ContractToUpdate{
-		Block: &blockNumber,
-	})
-	if err != nil {
-		return errors.Wrap(err, "failed to save last handled block")
+		return errors.Wrap(err, "failed to process new contract")
 	}
 
 	i.log.WithField("address", event.Raw.Address.Hex()).Debugf("finish handling deploy event")
 	return nil
 }
 
-func (i *Indexer) recreateIssuerRunner(block int64) error {
+func (i *indexer) processNewContract(event *contracts.TokenFactoryContractTokenContractDeployed) error {
+	blockNumber := int64(event.Raw.BlockNumber)
+
+	newContract, err := i.ContractsQ.Insert(data.Contract{
+		Name:    event.TokenContractParams.TokenName,
+		Address: event.NewTokenContractAddr.Hex(),
+		Block:   blockNumber,
+		Type:    data.ISSUER,
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to save new contract")
+	}
+
+	treeStorage := postgres.NewStorage(i.cfg.DB(), newContract.Id)
+
+	_, err = merkletree.NewMerkleTree(i.ctx, treeStorage, data.MaxMTreeLevel)
+	if err != nil {
+		return errors.Wrap(err, "failed to create new merkle tree")
+	}
+
+	err = i.recreateIssuerRunner(blockNumber)
+	if err != nil {
+		return errors.Wrap(err, "failed to recreate issuers runner")
+	}
+
+	err = i.ContractsQ.FilterByAddresses(event.Raw.Address.Hex()).Update(data.ContractToUpdate{
+		Block: &blockNumber,
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to update fabric contract")
+	}
+
+	return nil
+}
+
+func (i *indexer) recreateIssuerRunner(block int64) error {
 	if i.Cancel == nil {
-		return errors.New("ctx cancel function is nil")
+		return errors.New(data.NilCancelFunctionErr)
 	}
 
 	i.Cancel()
+	i.wg.Wait()
 
 	dbContracts, err := i.ContractsQ.FilterByTypes(data.ISSUER).Select()
 	if err != nil {
@@ -89,6 +104,7 @@ func (i *Indexer) recreateIssuerRunner(block int64) error {
 
 	blocks, addresses := helpers.SeparateDataContractArrays(dbContracts)
 	cancelCtx, cancelFn := context.WithCancel(i.ctx)
+	i.wg.Add(1)
 
 	NewIndexer(
 		i.cfg,
@@ -96,7 +112,8 @@ func (i *Indexer) recreateIssuerRunner(block int64) error {
 		addresses,
 		append(blocks, block),
 		nil,
-	).Run(i.ctx)
+		i.wg,
+	).Run(cancelCtx)
 
 	i.Cancel = cancelFn
 	return nil
